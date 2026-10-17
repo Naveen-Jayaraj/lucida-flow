@@ -12,6 +12,11 @@ from urllib.parse import urljoin, quote
 import time
 from collections import deque
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
+
+load_dotenv()
+_default_browsers = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".playwright-browsers")
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", _default_browsers)
 
 
 class RateLimiter:
@@ -236,9 +241,14 @@ class LucidaClient:
             }
 
             # Try to parse from embedded JSON data first (more reliable)
+            self.last_search_error = None
             json_tracks = self._extract_tracks_from_json(response.content)
             if json_tracks:
                 results["tracks"] = json_tracks[:limit]
+                return results
+
+            if self.last_search_error:
+                results["error"] = self.last_search_error
                 return results
 
             # Fallback: Parse search results from HTML
@@ -317,7 +327,7 @@ class LucidaClient:
                 # Check if search was successful
                 if not results.get("success", False):
                     error_msg = results.get("error", "Unknown error")
-                    print(f"Search error: {error_msg}")
+                    self.last_search_error = error_msg
                     return []
 
                 results_inner = results.get("results", {})
@@ -473,12 +483,29 @@ class LucidaClient:
 
                 # Navigate to Lucida with the track URL
                 lucida_url = f"{self.base_url}?url={url}"
-                page.goto(lucida_url, wait_until="networkidle", timeout=60000)
+                page.goto(lucida_url, wait_until="domcontentloaded", timeout=60000)
 
-                # Wait for the download button to appear
-                page.wait_for_selector(
-                    "button.download-button, button:has-text('download')", timeout=30000
-                )
+                # Wait for the download button to appear with informative error detection
+                try:
+                    page.wait_for_selector(
+                        "button.download-button, button:has-text('download')", timeout=30000
+                    )
+                except Exception as wait_err:
+                    error_msg = None
+                    for sel in [".error", ".alert", "p", "h3", ".status"]:
+                        for el in page.query_selector_all(sel):
+                            if el.is_visible():
+                                txt = el.inner_text().strip()
+                                if any(w in txt.lower() for w in ["error", "invalid", "unsupported", "cannot", "failed"]):
+                                    error_msg = txt
+                                    break
+                        if error_msg:
+                            break
+                    if error_msg:
+                        browser.close()
+                        return {"success": False, "error": f"Lucida error: {error_msg}"}
+                    browser.close()
+                    return {"success": False, "error": f"Download button did not appear. Page might not support this URL: {str(wait_err)}"}
 
                 # Set up download handler
                 download_info: Dict[str, Optional[str]] = {"path": None, "error": None}
@@ -509,11 +536,8 @@ class LucidaClient:
                 ).first
                 download_button.click()
 
-                # Wait for download to start
-                page.wait_for_timeout(2000)
-
-                # Wait for download to finish
-                max_wait = 300  # 5 minutes max
+                # Wait for download to finish, monitoring status
+                max_wait = 180  # 3 minutes max
                 waited = 0
                 while (
                     download_info["path"] is None
@@ -522,6 +546,14 @@ class LucidaClient:
                 ):
                     page.wait_for_timeout(1000)
                     waited += 1
+                    # Check if page displayed a failure message
+                    for sel in [".error", ".toast-error", ".alert-error"]:
+                        el = page.query_selector(sel)
+                        if el and el.is_visible():
+                            t = el.inner_text().strip()
+                            if t:
+                                download_info["error"] = t
+                                break
 
                 browser.close()
 

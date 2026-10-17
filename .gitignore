@@ -45,3 +45,4 @@ downloads/
 *.aac
 *.wav
 *.log
+.playwright-browsers/

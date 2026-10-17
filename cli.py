@@ -6,7 +6,19 @@ Command-line interface for downloading music from Lucida.to
 
 import click
 import os
+import sys
 from dotenv import load_dotenv
+
+# Ensure UTF-8 output encoding on Windows consoles
+if sys.platform == "win32":
+    try:
+        if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+            sys.stdout.reconfigure(encoding="utf-8")
+        if sys.stderr.encoding and sys.stderr.encoding.lower() != "utf-8":
+            sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 from rich.console import Console
 from rich.table import Table
 from rich import print as rprint
@@ -56,6 +68,13 @@ def search(query, service, limit):
 
     if "error" in results:
         console.print(f"[bold red]Error:[/bold red] {results['error']}")
+        if service.lower() != "amazon_music":
+            console.print(
+                f"[yellow]Tip: Searching on '{service}' is currently restricted upstream on Lucida.to.[/yellow]"
+            )
+            console.print(
+                f"[green]Try searching with Amazon Music (the primary working service):[/green] [bold]python cli.py search \"{query}\" -s amazon_music[/bold]\n"
+            )
         return
 
     tracks = results.get("tracks", [])
@@ -70,6 +89,7 @@ def search(query, service, limit):
     table.add_column("Title", style="green")
     table.add_column("Artist", style="yellow")
     table.add_column("Album", style="magenta")
+    table.add_column("URL", style="dim cyan", overflow="fold")
 
     for idx, track in enumerate(tracks, 1):
         table.add_row(
@@ -77,6 +97,7 @@ def search(query, service, limit):
             track.get("name", "Unknown"),
             track.get("artist", "Unknown"),
             track.get("album", "Unknown"),
+            track.get("url", ""),
         )
 
     console.print(table)
@@ -84,17 +105,45 @@ def search(query, service, limit):
 
 
 @cli.command()
-@click.argument("url")
+@click.argument("query_or_url")
 @click.option("--output", "-o", help="Output directory", default=None)
-def download(url, output):
-    """Download a track from URL"""
-    console.print(f"\n[bold cyan]Downloading from:[/bold cyan] {url}\n")
+@click.option(
+    "--service",
+    "-s",
+    default="amazon_music",
+    help="Music service to search if a song title was provided instead of a URL",
+)
+def download(query_or_url, output, service):
+    """Download a track from URL (or search and download by song name)"""
+    client = LucidaClient()
+    target_url = query_or_url
+
+    # If the user passed a song title/search query instead of a URL
+    if not (query_or_url.startswith("http://") or query_or_url.startswith("https://")):
+        console.print(
+            f"\n[cyan]Detected song query:[/cyan] \"{query_or_url}\""
+        )
+        with console.status(f"[bold green]Searching {service}..."):
+            search_results = client.search(query_or_url, service=service, limit=1)
+
+        tracks = search_results.get("tracks", [])
+        if not tracks or not tracks[0].get("url"):
+            console.print(f"[bold red]No matching tracks found for:[/bold red] {query_or_url}")
+            console.print("[dim]Tip: Try searching with `python cli.py search \"<query>\"` to see available tracks or provide a full URL.[/dim]\n")
+            return
+
+        track = tracks[0]
+        target_url = track["url"]
+        console.print(
+            f"[bold green]Selected track:[/bold green] {track.get('name')} by {track.get('artist')}"
+        )
+        console.print(f"[dim]URL: {target_url}[/dim]\n")
+
+    console.print(f"[bold cyan]Downloading from:[/bold cyan] {target_url}\n")
 
     with console.status("[bold green]Preparing download..."):
-        client = LucidaClient()
-
         # Get track info first
-        info = client.get_track_info(url)
+        info = client.get_track_info(target_url)
 
         if "error" in info:
             console.print(
@@ -109,7 +158,7 @@ def download(url, output):
             console.print()
 
     with console.status("[bold green]Downloading..."):
-        result = client.download_track(url, output)
+        result = client.download_track(target_url, output)
 
     if result.get("success"):
         console.print(f"[bold green]✓ Download successful![/bold green]")

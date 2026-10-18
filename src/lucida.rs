@@ -34,7 +34,12 @@ impl LucidaClient {
         let base_url = std::env::var("LUCIDA_BASE_URL").unwrap_or_else(|_| "https://lucida.to".to_string());
         let client = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-            .timeout(Duration::from_secs(45))
+            .connect_timeout(Duration::from_secs(20))
+            .read_timeout(Duration::from_secs(90))
+            .tcp_nodelay(true)
+            .tcp_keepalive(Some(Duration::from_secs(60)))
+            .pool_idle_timeout(Some(Duration::from_secs(90)))
+            .pool_max_idle_per_host(10)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -270,13 +275,18 @@ impl LucidaClient {
         let timeout = Duration::from_secs(180);
         let mut last_msg = String::new();
 
+        let mut poll_interval = Duration::from_millis(250);
+
         loop {
             if poll_start.elapsed() > timeout {
                 pb.finish_and_clear();
                 return Err("Server processing timed out after 3 minutes".into());
             }
 
-            tokio::time::sleep(Duration::from_millis(800)).await;
+            tokio::time::sleep(poll_interval).await;
+            if poll_interval < Duration::from_millis(750) {
+                poll_interval += Duration::from_millis(100);
+            }
 
             let st_res: serde_json::Value = self.client.get(&status_url)
                 .header("Referer", "https://lucida.to/")
@@ -314,6 +324,8 @@ impl LucidaClient {
 
         let resp = self.client.get(&download_url)
             .header("Referer", "https://lucida.to/")
+            .header("Accept", "*/*")
+            .header("Accept-Encoding", "identity")
             .send()
             .await?;
 
@@ -370,22 +382,37 @@ impl LucidaClient {
         );
         pb_dl.set_message(safe_filename);
 
-        let mut file = tokio::fs::File::create(&target_path).await?;
-        let mut downloaded: u64 = 0;
-        let mut resp = resp;
+        // Safe stream download with immediate cleanup if stream errors
+        let stream_result: Result<u64, Box<dyn Error + Send + Sync>> = async {
+            let file = tokio::fs::File::create(&target_path).await?;
+            let mut writer = tokio::io::BufWriter::with_capacity(256 * 1024, file);
+            let mut downloaded: u64 = 0;
+            let mut stream = resp;
 
-        while let Some(chunk) = resp.chunk().await? {
-            file.write_all(&chunk).await?;
-            downloaded += chunk.len() as u64;
-            pb_dl.set_position(downloaded);
+            while let Some(chunk) = stream.chunk().await? {
+                writer.write_all(&chunk).await?;
+                downloaded += chunk.len() as u64;
+                pb_dl.set_position(downloaded);
+            }
+
+            writer.flush().await?;
+            Ok(downloaded)
+        }.await;
+
+        match stream_result {
+            Ok(downloaded) => {
+                pb_dl.finish_and_clear();
+                Ok(DownloadResult {
+                    filepath: target_path,
+                    size: downloaded,
+                })
+            }
+            Err(e) => {
+                pb_dl.finish_and_clear();
+                // Clean up partial corrupted file immediately!
+                let _ = fs::remove_file(&target_path);
+                Err(e)
+            }
         }
-
-        file.flush().await?;
-        pb_dl.finish_and_clear();
-
-        Ok(DownloadResult {
-            filepath: target_path,
-            size: downloaded,
-        })
     }
 }

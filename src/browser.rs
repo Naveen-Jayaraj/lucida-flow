@@ -133,6 +133,16 @@ pub async fn download_track(
         .arg("--no-sandbox")
         .arg("--disable-gpu")
         .arg("--disable-dev-shm-usage")
+        .arg("--disable-background-networking")
+        .arg("--disable-background-timer-throttling")
+        .arg("--disable-client-side-phishing-detection")
+        .arg("--disable-default-apps")
+        .arg("--disable-sync")
+        .arg("--disable-translate")
+        .arg("--metrics-recording-only")
+        .arg("--no-first-run")
+        .arg("--mute-audio")
+        .arg("--disable-extensions")
         .arg("--disable-blink-features=AutomationControlled")
         .arg("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
         .arg("--window-size=1920,1080")
@@ -166,7 +176,7 @@ pub async fn download_track(
                 }
             }
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
     let port = assigned_port.ok_or("Failed to read Chromium DevTools port")?;
@@ -244,7 +254,7 @@ pub async fn download_track(
                 }
             }
         }
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     let page_ws_url = page_ws_url.ok_or("Failed to find Lucida page in Chromium")?;

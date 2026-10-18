@@ -46,3 +46,6 @@ downloads/
 *.wav
 *.log
 .playwright-browsers/
+.temp_profile/
+target/
+lucida.exe

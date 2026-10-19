@@ -2,6 +2,7 @@ mod browser;
 mod fuzzy;
 mod lucida;
 mod metadata;
+mod spotify;
 mod youtube;
 
 use clap::{Parser, Subcommand};
@@ -48,6 +49,29 @@ enum Commands {
         source: String,
     },
 
+    /// Download all tracks from a Spotify playlist URL or ID
+    #[command(alias = "spotify")]
+    Playlist {
+        /// Spotify playlist URL or ID (e.g. https://open.spotify.com/playlist/...)
+        url_or_id: String,
+
+        /// Custom output folder (default: downloads/<playlist_name>)
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// Streaming service to search on Lucida (default: amazon_music)
+        #[arg(short, long, default_value = "amazon_music")]
+        service: String,
+
+        /// Download source preference: "auto", "lucida", "youtube"
+        #[arg(long, default_value = "auto")]
+        source: String,
+
+        /// Number of concurrent downloads (batching) to maximize speed (default: 3)
+        #[arg(short, long, default_value_t = 3)]
+        concurrency: usize,
+    },
+
     /// Search for tracks on Lucida and YouTube in parallel with fuzzy logic
     Search {
         /// Search query (e.g., song title, artist)
@@ -90,13 +114,47 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             service,
             source,
         }) => {
-            run_download(
+            if spotify::is_spotify_playlist(&query_or_url) {
+                spotify::download_spotify_playlist(
+                    &lucida_client,
+                    &youtube_client,
+                    &query_or_url,
+                    output.as_deref(),
+                    &service,
+                    &source,
+                    3,
+                    &download_dir,
+                )
+                .await?;
+            } else {
+                run_download(
+                    &lucida_client,
+                    &youtube_client,
+                    &query_or_url,
+                    output.as_deref(),
+                    &service,
+                    &source,
+                    &download_dir,
+                )
+                .await?;
+            }
+        }
+
+        Some(Commands::Playlist {
+            url_or_id,
+            output,
+            service,
+            source,
+            concurrency,
+        }) => {
+            spotify::download_spotify_playlist(
                 &lucida_client,
                 &youtube_client,
-                &query_or_url,
+                &url_or_id,
                 output.as_deref(),
                 &service,
                 &source,
+                concurrency,
                 &download_dir,
             )
             .await?;
@@ -125,9 +183,10 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 println!("  {} {}", "✓".green(), s);
             }
             println!("  {} {}", "✓".red(), "youtube (via yt-audio-api / yt-dlp highest quality)");
+            println!("  {} {}", "✓".green(), "spotify (playlists via xwolf API + dual Lucida/YouTube pipeline)");
             println!(
                 "\n{}\n",
-                format!("Total: {} services + YouTube", lucida_client.get_available_services().len()).dimmed()
+                format!("Total: {} services + YouTube + Spotify", lucida_client.get_available_services().len()).dimmed()
             );
         }
 
@@ -151,20 +210,35 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             // Quick download mode: `lucida "song title"` or `lucida "https://..."`
             if !cli.quick_args.is_empty() {
                 let query_or_url = cli.quick_args.join(" ");
-                run_download(
-                    &lucida_client,
-                    &youtube_client,
-                    &query_or_url,
-                    None,
-                    "amazon_music",
-                    "auto",
-                    &download_dir,
-                )
-                .await?;
+                if spotify::is_spotify_playlist(&query_or_url) {
+                    spotify::download_spotify_playlist(
+                        &lucida_client,
+                        &youtube_client,
+                        &query_or_url,
+                        None,
+                        "amazon_music",
+                        "auto",
+                        3,
+                        &download_dir,
+                    )
+                    .await?;
+                } else {
+                    run_download(
+                        &lucida_client,
+                        &youtube_client,
+                        &query_or_url,
+                        None,
+                        "amazon_music",
+                        "auto",
+                        &download_dir,
+                    )
+                    .await?;
+                }
             } else {
-                println!("{}", "Lucida Flow + YouTube (Rust Edition with Fuzzy Search)".bold().cyan());
+                println!("{}", "Lucida Flow + YouTube + Spotify (Rust Edition)".bold().cyan());
                 println!("Usage:");
                 println!("  lucida \"<song title or url>\"");
+                println!("  lucida playlist \"<spotify playlist url or id>\" [--concurrency 3]");
                 println!("  lucida download \"<song title or url>\" [--source auto|lucida|youtube|both]");
                 println!("  lucida search \"<query>\" [--limit 5] [--source all|lucida|youtube]");
                 println!("  lucida services");
@@ -211,6 +285,21 @@ async fn run_download(
     download_dir: &str,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let is_url = query_or_url.starts_with("http://") || query_or_url.starts_with("https://");
+
+    // Case 0: Spotify Playlist URL or ID provided
+    if spotify::is_spotify_playlist(query_or_url) {
+        return spotify::download_spotify_playlist(
+            lucida_client,
+            youtube_client,
+            query_or_url,
+            output,
+            service,
+            source_pref,
+            3,
+            download_dir,
+        )
+        .await;
+    }
 
     // Case 1: Direct YouTube URL provided
     if is_url && is_youtube_url(query_or_url) {

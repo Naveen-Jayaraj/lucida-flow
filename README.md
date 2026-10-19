@@ -7,6 +7,7 @@ High-performance music search and downloader engine written in pure Rust with Py
 ## ⚡ Features
 
 - 🏎️ **Parallel Search Engine**: Queries Lucida and YouTube concurrently with zero added latency.
+- 🟢 **Spotify Playlist Downloader**: Pass any Spotify playlist link or ID (`https://open.spotify.com/playlist/...`), parse all tracks via Spotify API proxy, put each through the dual Lucida/YouTube pipeline, pick the best match, and download all tracks into a dedicated folder named after the playlist with batch concurrency.
 - 🎯 **Fuzzy Logic Matching**: Advanced multi-tier scoring (token set coverage, character bigrams, and typo-resilience) ranks close matches with match percentages.
 - ⚖️ **Balanced 50/50 Results**: Lists ~10 total results (top 5 for Lucida + top 5 for YouTube) so you can choose the exact version you want.
 - 🎧 **Dual Source Quality Selection**:
@@ -14,14 +15,33 @@ High-performance music search and downloader engine written in pure Rust with Py
   - **YouTube (yt-audio-api / yt-dlp)**: Highest quality audio (320kbps MP3 / Best Opus) extracted with FFmpeg.
 - 📋 **Full Track Details**: View Title, Artist/Channel, Album, Duration, Views, and Audio Format before downloading.
 - 🔄 **Smart Interactive Prompt**: Prompt to choose `[1] Lucida`, `[2] YouTube`, `[3] Both`, or `[q] Cancel`.
-- 🔗 **Direct URL Auto-Routing**: Pass any direct YouTube link or streaming link and it downloads immediately.
+- 🔗 **Direct URL Auto-Routing**: Pass any direct YouTube link, Lucida streaming link, or Spotify playlist link and it downloads immediately.
 - 🐍 **Python Wrapper & REST API**: Run via `download.py` or start the REST API service via `yt_audio_api.py --serve`.
 
 ---
 
 ## 🚀 Usage
 
-### 1. Quick Download (Interactive Dual Search)
+### 1. Spotify Playlist Downloader (Fast Concurrent Batching)
+Download an entire Spotify playlist directly by URL or ID:
+```bash
+# Direct command with concurrency control (default: 3 concurrent downloads)
+lucida playlist "https://open.spotify.com/playlist/37i9dQZF1DX3bcfiyW6qms?si=AlR_u-HMT3q3hoknYT9N-Q" --concurrency 4
+
+# Or pass Spotify link directly (auto-detected)
+lucida "https://open.spotify.com/playlist/37i9dQZF1DX3bcfiyW6qms"
+
+# Or use the playlist ID
+lucida playlist 37i9dQZF1DX3bcfiyW6qms
+```
+- Fetches all tracks via `https://spotify.xwolf.space/api/playlist/{PLAYLIST_ID}`.
+- Puts tracks one-by-one into the dual Lucida & YouTube pipeline.
+- Automatically selects the best matching candidate (Lossless FLAC from Lucida or 320kbps MP3 from YouTube).
+- Saves all tracks inside `./downloads/<Playlist_Name>/`.
+- Embeds metadata, front cover art, and synchronized `.lrc` lyrics.
+- Automatically skips tracks that have already been downloaded for instant resumes.
+
+### 2. Quick Download (Interactive Dual Search)
 Search both sources in parallel and choose:
 ```bash
 lucida "Orikkal Nee Paranju"

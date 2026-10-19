@@ -1,6 +1,7 @@
 mod browser;
 mod fuzzy;
 mod lucida;
+mod metadata;
 mod youtube;
 
 use clap::{Parser, Subcommand};
@@ -10,6 +11,7 @@ use lucida::LucidaClient;
 use std::env;
 use std::error::Error;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::time::Duration;
 use youtube::YouTubeClient;
 
@@ -213,13 +215,20 @@ async fn run_download(
     // Case 1: Direct YouTube URL provided
     if is_url && is_youtube_url(query_or_url) {
         println!("\n{} {}\n", "Detected direct YouTube link:".bold().red(), query_or_url);
-        return download_from_youtube(youtube_client, query_or_url, output, download_dir).await;
+        let path = download_from_youtube(youtube_client, query_or_url, output, download_dir).await?;
+        let vid = query_or_url.split("v=").nth(1).and_then(|v| v.split('&').next());
+        let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "track".to_string());
+        let _ = metadata::enrich_and_tag_audio(&path, &stem, None, None, vid).await;
+        return Ok(());
     }
 
     // Case 2: Direct streaming service URL provided (Lucida)
     if is_url {
         println!("\n{} {}\n", "Detected streaming track link:".bold().cyan(), query_or_url);
-        return download_from_lucida(lucida_client, query_or_url, output, download_dir).await;
+        let path = download_from_lucida(lucida_client, query_or_url, output, download_dir).await?;
+        let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "track".to_string());
+        let _ = metadata::enrich_and_tag_audio(&path, &stem, None, None, None).await;
+        return Ok(());
     }
 
     // Case 3: Song query string - Fuzzy parallel search (up to 10 candidates each)
@@ -414,26 +423,58 @@ async fn run_download(
         match &all_candidates[idx] {
             CandidateTrack::Lucida { track, .. } => {
                 println!("\n{} {} (Lossless FLAC)...", "Downloading from Lucida:".bold().green(), track.name.bold());
-                if let Err(e) = download_from_lucida(lucida_client, &track.url, output, download_dir).await {
-                    eprintln!("  {} Lucida download failed: {}", "⚠".yellow(), e);
+                match download_from_lucida(lucida_client, &track.url, output, download_dir).await {
+                    Ok(path) => {
+                        let _ = metadata::enrich_and_tag_audio(
+                            &path,
+                            &track.name,
+                            Some(&track.artist),
+                            Some(&track.album),
+                            None,
+                        ).await;
+                    }
+                    Err(e) => {
+                        eprintln!("  {} Lucida download failed: {}", "⚠".yellow(), e);
 
-                    // Automatic fallback to matching YouTube candidate so user gets high-quality audio
-                    if let Some(yt_cand) = all_candidates.iter().find_map(|c| match c {
-                        CandidateTrack::YouTube { track: yt, .. } => Some(yt),
-                        _ => None,
-                    }) {
-                        println!(
-                            "\n{} {} (Highest Quality Audio via yt-audio-api)...",
-                            "🔄 Automatically falling back to YouTube:".bold().yellow(),
-                            yt_cand.title.bold()
-                        );
-                        let _ = download_from_youtube(youtube_client, &yt_cand.url, output, download_dir).await;
+                        // Automatic fallback to matching YouTube candidate so user gets high-quality audio
+                        if let Some(yt_cand) = all_candidates.iter().find_map(|c| match c {
+                            CandidateTrack::YouTube { track: yt, .. } => Some(yt),
+                            _ => None,
+                        }) {
+                            println!(
+                                "\n{} {} (Highest Quality Audio via yt-audio-api)...",
+                                "🔄 Automatically falling back to YouTube:".bold().yellow(),
+                                yt_cand.title.bold()
+                            );
+                            if let Ok(path) = download_from_youtube(youtube_client, &yt_cand.url, output, download_dir).await {
+                                let _ = metadata::enrich_and_tag_audio(
+                                    &path,
+                                    &yt_cand.title,
+                                    Some(&yt_cand.channel),
+                                    None,
+                                    Some(&yt_cand.video_id),
+                                ).await;
+                            }
+                        }
                     }
                 }
             }
             CandidateTrack::YouTube { track, .. } => {
                 println!("\n{} {} (Highest Quality Audio)...", "Downloading from YouTube:".bold().red(), track.title.bold());
-                download_from_youtube(youtube_client, &track.url, output, download_dir).await?;
+                match download_from_youtube(youtube_client, &track.url, output, download_dir).await {
+                    Ok(path) => {
+                        let _ = metadata::enrich_and_tag_audio(
+                            &path,
+                            &track.title,
+                            Some(&track.channel),
+                            None,
+                            Some(&track.video_id),
+                        ).await;
+                    }
+                    Err(e) => {
+                        eprintln!("  {} YouTube download failed: {}", "✗".red(), e);
+                    }
+                }
             }
         }
     }
@@ -446,7 +487,7 @@ async fn download_from_lucida(
     target_url: &str,
     output: Option<&str>,
     download_dir: &str,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
     println!("{} {}\n", "Downloading from Lucida:".bold().cyan(), target_url);
 
     // 1. Try fast pure Rust direct stream download first
@@ -456,7 +497,7 @@ async fn download_from_lucida(
             println!("{}: {}", "Saved to".bold(), res.filepath.display().to_string().cyan());
             let mb = res.size as f64 / (1024.0 * 1024.0);
             println!("{}: {} bytes ({:.2} MB)\n", "Size".bold(), res.size, mb);
-            return Ok(());
+            return Ok(res.filepath);
         }
         Err(e) => {
             eprintln!("  {} Direct stream failed ({}), falling back to browser automation...", "⚠".yellow(), e);
@@ -470,7 +511,7 @@ async fn download_from_lucida(
     let mb = res.size as f64 / (1024.0 * 1024.0);
     println!("{}: {} bytes ({:.2} MB)\n", "Size".bold(), res.size, mb);
 
-    Ok(())
+    Ok(res.filepath)
 }
 
 async fn download_from_youtube(
@@ -478,7 +519,7 @@ async fn download_from_youtube(
     url: &str,
     output: Option<&str>,
     download_dir: &str,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+) -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
     println!("{} {}\n", "Downloading from YouTube:".bold().red(), url);
 
     match youtube_client.download_track(url, output, download_dir).await {
@@ -488,13 +529,13 @@ async fn download_from_youtube(
             let mb = res.size as f64 / (1024.0 * 1024.0);
             println!("{}: {} bytes ({:.2} MB)", "Size".bold(), res.size, mb);
             println!("{}: {}\n", "Quality".bold(), "Highest (320kbps MP3 / Best Opus)".green());
+            Ok(res.filepath)
         }
         Err(e) => {
             eprintln!("\n{} {}\n", "✗ YouTube audio download failed:".bold().red(), e);
+            Err(e)
         }
     }
-
-    Ok(())
 }
 
 async fn run_search(
